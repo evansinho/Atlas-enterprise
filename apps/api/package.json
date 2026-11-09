@@ -7,17 +7,20 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "@atlas/database": "workspace:*",
     "dotenv": "^18.0.9",
+    "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.8",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
     "tsx": "^4.23.15",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "vitest": "^5.1.0"
   }
 }
