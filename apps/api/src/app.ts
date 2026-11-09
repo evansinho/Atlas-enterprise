@@ -1,11 +1,17 @@
 import Fastify from 'fastify'
+import cookie from '@fastify/cookie'
+
 import { pool } from '@atlas/database'
 import { organizationRoutes } from './modules/organizations/routes.js'
+import { identityRoutes } from './modules/identity/routes.js'
 
 export function buildApp() {
   const app = Fastify({
     logger: true,
   })
+
+  // Register the cookie plugin before routes that use cookies.
+  app.register(cookie)
 
   app.get('/health', async () => ({
     status: 'ok',
@@ -28,6 +34,10 @@ export function buildApp() {
         database: 'unavailable',
       })
     }
+  })
+
+  app.register(identityRoutes, {
+    prefix: '/auth',
   })
 
   app.register(organizationRoutes, {
