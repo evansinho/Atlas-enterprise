@@ -10,6 +10,8 @@ export function buildApp() {
     logger: true,
   })
 
+  app.decorateRequest('user', null)
+
   // Register the cookie plugin before routes that use cookies.
   app.register(cookie)
 

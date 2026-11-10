@@ -1,4 +1,5 @@
-export { db, pool } from './client.js'
+export { db, pool, withUserContext } from './client.js'
+export type { DatabaseTransaction } from './client.js'
 
 export {
   organizations,

@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm'
 import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import * as schema from './schema.js'
@@ -14,3 +15,20 @@ export const pool = new Pool({
 })
 
 export const db = drizzle(pool, { schema })
+
+export type DatabaseTransaction = Parameters<
+  Parameters<typeof db.transaction>[0]
+>[0]
+
+export async function withUserContext<T>(
+  userId: string,
+  callback: (tx: DatabaseTransaction) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT set_config('app.current_user_id', ${userId}, true)`,
+    )
+
+    return callback(tx)
+  })
+}

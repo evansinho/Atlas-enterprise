@@ -4,9 +4,9 @@ import { eq } from 'drizzle-orm'
 
 import {
   db,
-  pool,
   users,
 } from '@atlas/database'
+import { adminDb, closeAdminDatabase } from './admin-database.js'
 
 import {
   findUserByOidcIdentity,
@@ -20,11 +20,11 @@ describe('Identity service', () => {
   const email = `identity-${runId}@example.com`
 
   afterAll(async () => {
-    await db
+    await adminDb
       .delete(users)
       .where(eq(users.email, email))
 
-    await pool.end()
+    await closeAdminDatabase()
   })
 
   it('provisions a user from verified OIDC claims', async () => {
@@ -92,7 +92,7 @@ describe('Identity service', () => {
     expect(userIds.size).toBe(1)
     expect(results.filter((result) => result.created)).toHaveLength(1)
 
-    await db
+    await adminDb
       .delete(users)
       .where(eq(users.email, concurrentEmail))
   })

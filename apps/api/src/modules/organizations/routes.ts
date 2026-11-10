@@ -1,11 +1,22 @@
 import type { FastifyPluginAsync } from 'fastify'
+import { eq, sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { eq } from 'drizzle-orm'
+
 import {
-  db,
+  withUserContext,
   organizations,
   workspaces,
 } from '@atlas/database'
+
+import {
+  authenticate,
+  assertAuthenticated,
+} from '../identity/authenticate.js'
+
+import {
+  canManageOrganization,
+  getActiveOrganizationMembership,
+} from './authorization.js'
 
 const createOrganizationSchema = z.object({
   name: z.string().trim().min(2).max(160),
@@ -54,8 +65,12 @@ function isPostgresError(
 }
 
 export const organizationRoutes: FastifyPluginAsync = async (app) => {
-  // Create an organization
+  app.addHook('preHandler', authenticate)
+
+  // Create an organization and assign its creator as owner.
   app.post('/organizations', async (request, reply) => {
+    assertAuthenticated(request)
+
     const parsed = createOrganizationSchema.safeParse(request.body)
 
     if (!parsed.success) {
@@ -67,10 +82,31 @@ export const organizationRoutes: FastifyPluginAsync = async (app) => {
     }
 
     try {
-      const [organization] = await db
-        .insert(organizations)
-        .values(parsed.data)
-        .returning()
+      const organization = await withUserContext(
+        request.user.id,
+        async (tx) => {
+          type Organization = typeof organizations.$inferSelect
+          const result = await tx.execute(sql<Organization>`
+            SELECT
+              organization.id,
+              organization.name,
+              organization.slug,
+              organization.created_at AS "createdAt",
+              organization.updated_at AS "updatedAt"
+            FROM public.create_organization_with_owner(
+              ${parsed.data.name}::varchar(160),
+              ${parsed.data.slug}::varchar(80)
+            ) AS organization
+          `)
+          const [createdOrganization] = result.rows
+
+          if (!createdOrganization) {
+            throw new Error('Organization creation returned no result')
+          }
+
+          return createdOrganization
+        },
+      )
 
       return reply.code(201).send({ data: organization })
     } catch (error) {
@@ -93,10 +129,12 @@ export const organizationRoutes: FastifyPluginAsync = async (app) => {
     }
   })
 
-  // Retrieve an organization
+  // Retrieve an organization.
   app.get<{ Params: { id: string } }>(
     '/organizations/:id',
     async (request, reply) => {
+      assertAuthenticated(request)
+
       const parsed = idSchema.safeParse(request.params.id)
 
       if (!parsed.success) {
@@ -106,27 +144,60 @@ export const organizationRoutes: FastifyPluginAsync = async (app) => {
         })
       }
 
-      const [organization] = await db
-        .select()
-        .from(organizations)
-        .where(eq(organizations.id, parsed.data))
-        .limit(1)
+      const result = await withUserContext(
+        request.user.id,
+        async (tx) => {
+          const membership = await getActiveOrganizationMembership(
+            tx,
+            parsed.data,
+            request.user.id,
+          )
 
-      if (!organization) {
+          if (!membership) {
+            return { kind: 'forbidden' } as const
+          }
+
+          const [organization] = await tx
+            .select()
+            .from(organizations)
+            .where(eq(organizations.id, parsed.data))
+            .limit(1)
+
+          if (!organization) {
+            return { kind: 'not_found' } as const
+          }
+
+          return {
+            kind: 'ok',
+            organization,
+          } as const
+        },
+      )
+
+      if (result.kind === 'forbidden') {
+        return reply.code(403).send({
+          error: 'FORBIDDEN',
+          message: 'You do not have access to this organization',
+        })
+      }
+
+      if (result.kind === 'not_found') {
         return reply.code(404).send({
           error: 'NOT_FOUND',
           message: 'Organization not found',
         })
       }
 
-      return { data: organization }
+      return { data: result.organization }
     },
   )
 
-  // Create a workspace inside an organization
+  // Create a workspace inside an organization.
   app.post<{ Params: { id: string } }>(
     '/organizations/:id/workspaces',
     async (request, reply) => {
+      assertAuthenticated(request)
+
       const organizationId = idSchema.safeParse(request.params.id)
       const body = createWorkspaceSchema.safeParse(request.body)
 
@@ -139,15 +210,53 @@ export const organizationRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const [workspace] = await db
-          .insert(workspaces)
-          .values({
-            organizationId: organizationId.data,
-            ...body.data,
-          })
-          .returning()
+        const result = await withUserContext(
+          request.user.id,
+          async (tx) => {
+            const membership = await getActiveOrganizationMembership(
+              tx,
+              organizationId.data,
+              request.user.id,
+            )
 
-        return reply.code(201).send({ data: workspace })
+            if (!membership) {
+              return { kind: 'forbidden' } as const
+            }
+
+            if (!canManageOrganization(membership.role)) {
+              return { kind: 'insufficient_permissions' } as const
+            }
+
+            const [workspace] = await tx
+              .insert(workspaces)
+              .values({
+                organizationId: organizationId.data,
+                ...body.data,
+              })
+              .returning()
+
+            return {
+              kind: 'created',
+              workspace,
+            } as const
+          },
+        )
+
+        if (result.kind === 'forbidden') {
+          return reply.code(403).send({
+            error: 'FORBIDDEN',
+            message: 'You do not have access to this organization',
+          })
+        }
+
+        if (result.kind === 'insufficient_permissions') {
+          return reply.code(403).send({
+            error: 'INSUFFICIENT_PERMISSIONS',
+            message: 'You need an owner or admin role to create workspaces',
+          })
+        }
+
+        return reply.code(201).send({ data: result.workspace })
       } catch (error) {
         if (isPostgresError(error, '23503')) {
           return reply.code(404).send({
@@ -176,10 +285,12 @@ export const organizationRoutes: FastifyPluginAsync = async (app) => {
     },
   )
 
-  // List workspaces belonging to an organization
+  // List workspaces belonging to an organization.
   app.get<{ Params: { id: string } }>(
     '/organizations/:id/workspaces',
     async (request, reply) => {
+      assertAuthenticated(request)
+
       const parsed = idSchema.safeParse(request.params.id)
 
       if (!parsed.success) {
@@ -189,25 +300,39 @@ export const organizationRoutes: FastifyPluginAsync = async (app) => {
         })
       }
 
-      const [organization] = await db
-        .select({ id: organizations.id })
-        .from(organizations)
-        .where(eq(organizations.id, parsed.data))
-        .limit(1)
+      const result = await withUserContext(
+        request.user.id,
+        async (tx) => {
+          const membership = await getActiveOrganizationMembership(
+            tx,
+            parsed.data,
+            request.user.id,
+          )
 
-      if (!organization) {
-        return reply.code(404).send({
-          error: 'NOT_FOUND',
-          message: 'Organization not found',
+          if (!membership) {
+            return { kind: 'forbidden' } as const
+          }
+
+          const workspacesForOrganization = await tx
+            .select()
+            .from(workspaces)
+            .where(eq(workspaces.organizationId, parsed.data))
+
+          return {
+            kind: 'ok',
+            workspaces: workspacesForOrganization,
+          } as const
+        },
+      )
+
+      if (result.kind === 'forbidden') {
+        return reply.code(403).send({
+          error: 'FORBIDDEN',
+          message: 'You do not have access to this organization',
         })
       }
 
-      const results = await db
-        .select()
-        .from(workspaces)
-        .where(eq(workspaces.organizationId, parsed.data))
-
-      return { data: results }
+      return { data: result.workspaces }
     },
   )
 }
